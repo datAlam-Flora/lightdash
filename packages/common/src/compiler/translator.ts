@@ -36,7 +36,7 @@ import {
 import { type LightdashProjectConfig } from '../types/lightdashProjectConfig';
 import { OrderFieldsByStrategy, type GroupType } from '../types/table';
 import { type TimeFrames } from '../types/timeFrames';
-import { type WarehouseClient } from '../types/warehouse';
+import { type WarehouseSqlBuilder } from '../types/warehouse';
 import assertUnreachable from '../utils/assertUnreachable';
 import {
     getDefaultTimeFrames,
@@ -316,6 +316,15 @@ const convertDbtMetricToLightdashMetric = (
     };
 };
 
+function normalizePrimaryKey(
+    primaryKey: DbtModelNode['meta']['primary_key'],
+): string[] | undefined {
+    if (primaryKey) {
+        return Array.isArray(primaryKey) ? primaryKey : [primaryKey];
+    }
+    return undefined;
+}
+
 export const convertTable = (
     adapterType: SupportedDbtAdapter,
     model: DbtModelNode,
@@ -572,6 +581,7 @@ export const convertTable = (
                 ? (meta.order_fields_by.toUpperCase() as OrderFieldsByStrategy)
                 : OrderFieldsByStrategy.LABEL,
         groupLabel: meta.group_label,
+        primaryKey: normalizePrimaryKey(meta.primary_key),
         sqlWhere: meta.sql_filter || meta.sql_where,
         requiredFilters: parseModelRequiredFilters({
             requiredFilters: meta.required_filters,
@@ -638,7 +648,7 @@ export const convertExplores = async (
     loadSources: boolean,
     adapterType: SupportedDbtAdapter,
     metrics: DbtMetric[],
-    warehouseClient: WarehouseClient,
+    warehouseSqlBuilder: WarehouseSqlBuilder,
     lightdashProjectConfig: LightdashProjectConfig,
 ): Promise<(Explore | ExploreError)[]> => {
     const tableLineage = translateDbtModelsToTableLineage(models);
@@ -656,7 +666,7 @@ export const convertExplores = async (
                     model,
                     tableMetrics,
                     lightdashProjectConfig.spotlight,
-                    warehouseClient.getStartOfWeek(),
+                    warehouseSqlBuilder.getStartOfWeek(),
                 );
 
                 // add sources
@@ -703,7 +713,7 @@ export const convertExplores = async (
         (model) => tableLookup[model.name] !== undefined,
     );
 
-    const exploreCompiler = new ExploreCompiler(warehouseClient);
+    const exploreCompiler = new ExploreCompiler(warehouseSqlBuilder);
     const explores: (Explore | ExploreError)[] = validModels.map((model) => {
         const meta = model.config?.meta || model.meta; // Config block takes priority, then meta block
 
@@ -723,6 +733,7 @@ export const convertExplores = async (
                     fields: join.fields,
                     hidden: join.hidden,
                     always: join.always,
+                    relationship: join.relationship,
                 })),
                 tables: tableLookup,
                 targetDatabase: adapterType,

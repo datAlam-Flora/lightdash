@@ -36,8 +36,11 @@ import Page from '../../../components/common/Page/Page';
 import { useGetSlack, useSlackChannels } from '../../../hooks/slack/useSlack';
 import { useProject } from '../../../hooks/useProject';
 import useApp from '../../../providers/App/useApp';
+import useTracking from '../../../providers/Tracking/useTracking';
+import { EventName } from '../../../types/Events';
 import { ConversationsList } from '../../features/aiCopilot/components/ConversationsList';
 import { SlackIntegrationSteps } from '../../features/aiCopilot/components/SlackIntegrationSteps';
+import { useAiAgentPermission } from '../../features/aiCopilot/hooks/useAiAgentPermission';
 import { useDeleteAiAgentMutation } from '../../features/aiCopilot/hooks/useOrganizationAiAgents';
 import {
     useProjectAiAgent,
@@ -69,17 +72,19 @@ type Props = {
 };
 
 const ProjectAiAgentEditPage: FC<Props> = ({ isCreateMode = false }) => {
-    const { user } = useApp();
-    const userCanManageOrganization = useMemo(
-        () => user.data?.ability.can('manage', 'Organization'),
-        [user],
-    );
-
-    const navigate = useNavigate();
     const { agentUuid, projectUuid } = useParams<{
         agentUuid: string;
         projectUuid: string;
     }>();
+    const canManageAgents = useAiAgentPermission({
+        action: 'manage',
+        projectUuid,
+    });
+
+    const navigate = useNavigate();
+    const { track } = useTracking();
+    const { user } = useApp();
+
     const [deleteModalOpen, setDeleteModalOpen] = useState(false);
 
     const { data: project } = useProject(projectUuid);
@@ -165,21 +170,47 @@ const ProjectAiAgentEditPage: FC<Props> = ({ isCreateMode = false }) => {
     };
 
     const handleSubmit = form.onSubmit(async (values) => {
-        if (!projectUuid) {
+        if (!projectUuid || !user?.data) {
             return;
         }
 
         if (isCreateMode) {
-            await createAgent({
+            const result = await createAgent({
                 ...values,
                 projectUuid,
             });
+
+            if (user.data.organizationUuid) {
+                track({
+                    name: EventName.AI_AGENT_CREATED,
+                    properties: {
+                        userId: user.data.userUuid,
+                        organizationId: user.data.organizationUuid,
+                        projectId: projectUuid,
+                        aiAgentId: result.uuid,
+                        agentName: values.name,
+                    },
+                });
+            }
         } else if (actualAgentUuid) {
             await updateAgent({
                 uuid: actualAgentUuid,
                 projectUuid,
                 ...values,
             });
+
+            if (user.data.organizationUuid) {
+                track({
+                    name: EventName.AI_AGENT_UPDATED,
+                    properties: {
+                        userId: user.data.userUuid,
+                        organizationId: user.data.organizationUuid,
+                        projectId: projectUuid,
+                        aiAgentId: actualAgentUuid,
+                        agentName: values.name,
+                    },
+                });
+            }
         }
     });
 
@@ -188,23 +219,37 @@ const ProjectAiAgentEditPage: FC<Props> = ({ isCreateMode = false }) => {
     }, []);
 
     const handleDelete = useCallback(async () => {
-        if (!actualAgentUuid) {
+        if (!actualAgentUuid || !user?.data || !projectUuid || !agent) {
             return;
         }
 
         await deleteAgent(actualAgentUuid);
+
+        if (user.data.organizationUuid) {
+            track({
+                name: EventName.AI_AGENT_DELETED,
+                properties: {
+                    userId: user.data.userUuid,
+                    organizationId: user.data.organizationUuid,
+                    projectId: projectUuid,
+                    aiAgentId: actualAgentUuid,
+                    agentName: agent.name,
+                },
+            });
+        }
+
         setDeleteModalOpen(false);
-    }, [actualAgentUuid, deleteAgent]);
+    }, [actualAgentUuid, deleteAgent, user?.data, projectUuid, agent, track]);
 
     const handleCancelDelete = useCallback(() => {
         setDeleteModalOpen(false);
     }, []);
 
     useEffect(() => {
-        if (!userCanManageOrganization) {
+        if (!canManageAgents) {
             void navigate(`/projects/${projectUuid}/ai-agents`);
         }
-    }, [userCanManageOrganization, navigate, projectUuid]);
+    }, [canManageAgents, navigate, projectUuid]);
 
     if (!isCreateMode && actualAgentUuid && !agent && !isLoadingAgent) {
         return (
@@ -558,7 +603,7 @@ const ProjectAiAgentEditPage: FC<Props> = ({ isCreateMode = false }) => {
                         <ConversationsList
                             agentUuid={actualAgentUuid!}
                             agentName={agent?.name ?? 'Agent'}
-                            allUsers={userCanManageOrganization}
+                            allUsers={canManageAgents}
                         />
                     </Tabs.Panel>
                 </Tabs>

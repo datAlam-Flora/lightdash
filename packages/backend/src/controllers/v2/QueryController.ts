@@ -215,6 +215,7 @@ export class QueryController extends BaseController {
                 dashboardFilters: body.dashboardFilters,
                 dashboardSorts: body.dashboardSorts,
                 dateZoom: body.dateZoom,
+                limit: body.limit,
                 context: context ?? QueryExecutionContext.API,
             });
 
@@ -416,21 +417,19 @@ export class QueryController extends BaseController {
     > {
         this.setStatus(200);
 
-        const results = await this.services
-            .getAsyncQueryService()
-            .downloadAsyncQueryResults({
-                user: req.user!,
-                projectUuid,
-                queryUuid,
-                type: body.type,
-                onlyRaw: body.onlyRaw,
-                showTableNames: body.showTableNames,
-                customLabels: body.customLabels,
-                columnOrder: body.columnOrder,
-                hiddenFields: body.hiddenFields,
-                pivotConfig: body.pivotConfig,
-                attachmentDownloadName: body.attachmentDownloadName,
-            });
+        const results = await this.services.getAsyncQueryService().download({
+            user: req.user!,
+            projectUuid,
+            queryUuid,
+            type: body.type,
+            onlyRaw: body.onlyRaw,
+            showTableNames: body.showTableNames,
+            customLabels: body.customLabels,
+            columnOrder: body.columnOrder,
+            hiddenFields: body.hiddenFields,
+            pivotConfig: body.pivotConfig,
+            attachmentDownloadName: body.attachmentDownloadName,
+        });
 
         return {
             status: 'ok',

@@ -2,10 +2,11 @@ import type {
     AiAgent,
     AiAgentMessageAssistant,
     ApiAiAgentResponse,
-    ApiAiAgentStartThreadResponse,
-    ApiAiAgentThreadGenerateRequest,
-    ApiAiAgentThreadGenerateResponse,
-    ApiAiAgentThreadMessageViz,
+    ApiAiAgentThreadCreateRequest,
+    ApiAiAgentThreadCreateResponse,
+    ApiAiAgentThreadMessageCreateRequest,
+    ApiAiAgentThreadMessageCreateResponse,
+    ApiAiAgentThreadMessageVizQuery,
     ApiAiAgentThreadResponse,
     ApiAiAgentThreadSummaryListResponse,
     ApiError,
@@ -14,18 +15,18 @@ import type {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { lightdashApi } from '../../../../api';
-import { pollJobStatus } from '../../../../features/scheduler/hooks/useScheduler';
 import useHealth from '../../../../hooks/health/useHealth';
 import { useOrganization } from '../../../../hooks/organization/useOrganization';
 import useToaster from '../../../../hooks/toaster/useToaster';
 import { useActiveProject } from '../../../../hooks/useActiveProject';
 import { type UserWithAbility } from '../../../../hooks/user/useUser';
 import useApp from '../../../../providers/App/useApp';
-import { getChartVisualizationFromAiQuery } from '../utils/getChartVisualizationFromAiQuery';
+import { useAiAgentThreadStreamMutation } from '../streaming/useAiAgentThreadStreamMutation';
+import { getOptimisticMessageStub } from '../utils/thinkingMessageStub';
 import { PROJECT_AI_AGENTS_KEY, useProjectAiAgent } from './useProjectAiAgents';
+import { USER_AGENT_PREFERENCES } from './useUserAgentPreferences';
 
 const AI_AGENTS_KEY = 'aiAgents';
-
 // API calls
 
 const getAgent = async (
@@ -63,13 +64,13 @@ const getAgentThread = async (agentUuid: string, threadUuid: string) =>
         body: undefined,
     });
 
-const getAgentThreadMessageViz = async (args: {
+const getAgentThreadMessageVizQuery = async (args: {
     agentUuid: string;
     threadUuid: string;
     messageUuid: string;
 }) =>
-    lightdashApi<ApiAiAgentThreadMessageViz>({
-        url: `/aiAgents/${args.agentUuid}/threads/${args.threadUuid}/message/${args.messageUuid}/viz`,
+    lightdashApi<ApiAiAgentThreadMessageVizQuery>({
+        url: `/aiAgents/${args.agentUuid}/threads/${args.threadUuid}/message/${args.messageUuid}/viz-query`,
         method: 'GET',
         body: undefined,
     });
@@ -106,18 +107,29 @@ export const useDeleteAiAgentMutation = () => {
 
     return useMutation<ApiSuccessEmpty, ApiError, string>({
         mutationFn: (agentUuid) => deleteAgent(agentUuid),
-        onSuccess: () => {
+        onSuccess: async () => {
             showToastSuccess({
                 title: 'AI agent deleted successfully',
             });
-            // Invalidate Project ai agent queries
-            void queryClient.invalidateQueries({
-                queryKey: [PROJECT_AI_AGENTS_KEY, activeProjectUuid],
-                exact: true,
-            });
-            // Invalidate Organization ai agent queries
-            void queryClient.invalidateQueries({
-                queryKey: [AI_AGENTS_KEY],
+            await Promise.all(
+                [
+                    // Invalidates Project queries
+                    [PROJECT_AI_AGENTS_KEY, activeProjectUuid],
+                    // Invalidates Organization queries
+                    [AI_AGENTS_KEY],
+                    // Invalidates User Preferences queries
+                    [USER_AGENT_PREFERENCES, activeProjectUuid],
+                ].map((queryKey) =>
+                    queryClient.invalidateQueries({
+                        queryKey,
+                        exact: true,
+                    }),
+                ),
+            );
+            // Not sure why this is needed, the invalidation is performed as a new request is triggered,
+            // but the hook is still returning stale data
+            await queryClient.refetchQueries({
+                queryKey: [USER_AGENT_PREFERENCES, activeProjectUuid],
                 exact: true,
             });
             void navigate(`/projects/${activeProjectUuid}/ai-agents`);
@@ -196,27 +208,32 @@ const createOptimisticMessages = (
             role: 'assistant' as const,
             uuid: Math.random().toString(36),
             threadUuid,
-            message: 'Thinking...',
+            message: getOptimisticMessageStub(),
             createdAt: new Date().toISOString(),
             user: {
                 name: agent?.name ?? 'Unknown',
                 uuid: agent?.uuid ?? 'unknown',
             },
+            vizConfigOutput: null,
+            filtersOutput: null,
+            metricQuery: null,
+            humanScore: null,
+            toolCalls: [],
         },
     ];
 };
 
-const startAgentThread = async (
+const createAgentThread = async (
     agentUuid: string | undefined,
-    data: ApiAiAgentThreadGenerateRequest,
+    data: ApiAiAgentThreadCreateRequest,
 ) =>
-    lightdashApi<ApiAiAgentStartThreadResponse['results']>({
-        url: `/aiAgents/${agentUuid}/generate`,
+    lightdashApi<ApiAiAgentThreadCreateResponse['results']>({
+        url: `/aiAgents/${agentUuid}/threads`,
         method: 'POST',
         body: JSON.stringify(data),
     });
 
-export const useStartAgentThreadMutation = (
+export const useCreateAgentThreadMutation = (
     agentUuid: string | undefined,
     projectUuid: string | undefined,
 ) => {
@@ -225,22 +242,23 @@ export const useStartAgentThreadMutation = (
     const { showToastApiError } = useToaster();
     const { user } = useApp();
     const { data: agent } = useProjectAiAgent(projectUuid, agentUuid);
+    const { streamMessage } = useAiAgentThreadStreamMutation();
 
     return useMutation<
-        ApiAiAgentStartThreadResponse['results'],
+        ApiAiAgentThreadCreateResponse['results'],
         ApiError,
-        ApiAiAgentThreadGenerateRequest
+        ApiAiAgentThreadCreateRequest
     >({
         mutationFn: (data) =>
-            agentUuid ? startAgentThread(agentUuid, data) : Promise.reject(),
-        onSuccess: async (data, variables) => {
+            agentUuid ? createAgentThread(agentUuid, data) : Promise.reject(),
+        onSuccess: async (thread) => {
             // Invalidate both user-specific and all-users thread queries
             await queryClient.invalidateQueries({
                 queryKey: [AI_AGENTS_KEY, agentUuid, 'threads'],
             });
 
             queryClient.setQueryData(
-                [AI_AGENTS_KEY, agentUuid, 'threads', data.threadUuid],
+                [AI_AGENTS_KEY, agentUuid, 'threads', thread.uuid],
                 () => {
                     if (!agentUuid) {
                         return undefined;
@@ -248,12 +266,12 @@ export const useStartAgentThreadMutation = (
 
                     return {
                         createdFrom: 'web_app',
-                        firstMessage: variables.prompt,
+                        firstMessage: thread.firstMessage,
                         agentUuid: agentUuid,
-                        uuid: data.threadUuid,
+                        uuid: thread.uuid,
                         messages: createOptimisticMessages(
-                            data.threadUuid,
-                            variables.prompt,
+                            thread.uuid,
+                            thread.firstMessage,
                             user!.data!,
                             agent!,
                         ),
@@ -266,19 +284,22 @@ export const useStartAgentThreadMutation = (
                 },
             );
 
-            void pollJobStatus(data.jobId).then(() =>
-                queryClient.invalidateQueries({
-                    queryKey: [
-                        AI_AGENTS_KEY,
-                        agentUuid,
-                        'threads',
-                        data.threadUuid,
-                    ],
-                }),
-            );
+            void streamMessage({
+                agentUuid: thread.agentUuid,
+                threadUuid: thread.uuid,
+                onFinish: () =>
+                    queryClient.invalidateQueries({
+                        queryKey: [
+                            AI_AGENTS_KEY,
+                            agentUuid,
+                            'threads',
+                            thread.uuid,
+                        ],
+                    }),
+            });
 
             void navigate(
-                `/projects/${projectUuid}/ai-agents/${agentUuid}/threads/${data.threadUuid}`,
+                `/projects/${projectUuid}/ai-agents/${agentUuid}/threads/${thread.uuid}`,
                 {
                     viewTransition: true,
                 },
@@ -293,18 +314,18 @@ export const useStartAgentThreadMutation = (
     });
 };
 
-const generateAgentThreadResponse = async (
+const createAgentThreadMessage = async (
     agentUuid: string,
     threadUuid: string,
-    data: ApiAiAgentThreadGenerateRequest,
+    data: ApiAiAgentThreadMessageCreateRequest,
 ) =>
-    lightdashApi<ApiAiAgentThreadGenerateResponse['results']>({
-        url: `/aiAgents/${agentUuid}/threads/${threadUuid}/generate`,
+    lightdashApi<ApiAiAgentThreadMessageCreateResponse['results']>({
+        url: `/aiAgents/${agentUuid}/threads/${threadUuid}/messages`,
         method: 'POST',
         body: JSON.stringify(data),
     });
 
-export const useGenerateAgentThreadResponseMutation = (
+export const useCreateAgentThreadMessageMutation = (
     projectUuid: string | undefined,
     agentUuid: string | undefined,
     threadUuid: string | undefined,
@@ -313,15 +334,16 @@ export const useGenerateAgentThreadResponseMutation = (
     const { showToastApiError } = useToaster();
     const { user } = useApp();
     const { data: agent } = useProjectAiAgent(projectUuid, agentUuid);
+    const { streamMessage } = useAiAgentThreadStreamMutation();
 
     return useMutation<
-        ApiAiAgentThreadGenerateResponse['results'],
+        ApiAiAgentThreadMessageCreateResponse['results'],
         ApiError,
-        ApiAiAgentThreadGenerateRequest
+        ApiAiAgentThreadMessageCreateRequest
     >({
         mutationFn: (data) =>
             agentUuid && threadUuid
-                ? generateAgentThreadResponse(agentUuid, threadUuid, data)
+                ? createAgentThreadMessage(agentUuid, threadUuid, data)
                 : Promise.reject(),
         onMutate: (data) => {
             queryClient.setQueryData(
@@ -350,14 +372,18 @@ export const useGenerateAgentThreadResponseMutation = (
                 },
             );
         },
-        onSuccess: async (data) => {
-            await pollJobStatus(data.jobId);
-            await queryClient.invalidateQueries([
-                AI_AGENTS_KEY,
-                agentUuid,
-                'threads',
-                threadUuid,
-            ]);
+        onSuccess: async () => {
+            void streamMessage({
+                agentUuid: agentUuid!,
+                threadUuid: threadUuid!,
+                onFinish: () =>
+                    queryClient.invalidateQueries([
+                        AI_AGENTS_KEY,
+                        agentUuid,
+                        'threads',
+                        threadUuid,
+                    ]),
+            });
         },
         onError: ({ error }) => {
             showToastApiError({
@@ -368,8 +394,8 @@ export const useGenerateAgentThreadResponseMutation = (
     });
 };
 
-export const useAiAgentThreadMessageViz = (args: {
-    activeProjectUuid: string | undefined;
+export const useAiAgentThreadMessageVizQuery = (args: {
+    projectUuid: string | undefined;
     message: AiAgentMessageAssistant;
     agentUuid: string;
 }) => {
@@ -377,11 +403,7 @@ export const useAiAgentThreadMessageViz = (args: {
     const org = useOrganization();
     const { showToastApiError } = useToaster();
 
-    return useQuery<
-        ApiAiAgentThreadMessageViz,
-        ApiError,
-        ReturnType<typeof getChartVisualizationFromAiQuery>
-    >({
+    return useQuery<ApiAiAgentThreadMessageVizQuery, ApiError>({
         queryKey: [
             AI_AGENTS_KEY,
             args.agentUuid,
@@ -389,10 +411,10 @@ export const useAiAgentThreadMessageViz = (args: {
             args.message.threadUuid,
             'message',
             args.message.uuid,
-            'viz',
+            'viz-query',
         ],
         queryFn: () =>
-            getAgentThreadMessageViz({
+            getAgentThreadMessageVizQuery({
                 agentUuid: args.agentUuid,
                 threadUuid: args.message.threadUuid,
                 messageUuid: args.message.uuid,
@@ -406,16 +428,9 @@ export const useAiAgentThreadMessageViz = (args: {
         enabled:
             !!args.message.metricQuery &&
             !!args.message.vizConfigOutput &&
-            !!args.activeProjectUuid &&
+            !!args.projectUuid &&
             !!health.data &&
             !!org.data,
-        select: (data: ApiAiAgentThreadMessageViz) =>
-            getChartVisualizationFromAiQuery(
-                data,
-                health.data!,
-                org.data!,
-                args.activeProjectUuid,
-            ),
     });
 };
 

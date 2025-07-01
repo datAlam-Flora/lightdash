@@ -5,7 +5,6 @@ import {
 } from '@lightdash/common';
 import {
     ActionIcon,
-    Button,
     Card,
     Center,
     CopyButton,
@@ -20,48 +19,57 @@ import {
     IconCheck,
     IconCopy,
     IconExclamationCircle,
-    IconExternalLink,
     IconThumbDown,
     IconThumbDownFilled,
     IconThumbUp,
     IconThumbUpFilled,
 } from '@tabler/icons-react';
 import MDEditor from '@uiw/react-md-editor';
-import dayjs from 'dayjs';
+import { format, parseISO } from 'date-fns';
 import { memo, useCallback, useMemo, type FC } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
 import MantineIcon from '../../../../../components/common/MantineIcon';
-import { useActiveProjectUuid } from '../../../../../hooks/useActiveProject';
+import { useInfiniteQueryResults } from '../../../../../hooks/useQueryResults';
 import { useTimeAgo } from '../../../../../hooks/useTimeAgo';
 import useApp from '../../../../../providers/App/useApp';
 import {
-    useAiAgentThreadMessageViz,
+    useAiAgentThreadMessageVizQuery,
     useUpdatePromptFeedbackMutation,
 } from '../../hooks/useOrganizationAiAgents';
+import {
+    useAiAgentThreadStreaming,
+    useAiAgentThreadStreamQuery,
+} from '../../streaming/useAiAgentThreadStreamQuery';
+import { isOptimisticMessageStub } from '../../utils/thinkingMessageStub';
 import { AiChartVisualization } from './AiChartVisualization';
+import AgentToolCalls from './ToolCalls/AgentToolCalls';
 
 export const UserBubble: FC<{ message: AiAgentMessageUser<AiAgentUser> }> = ({
     message,
 }) => {
-    const timeAgo = useTimeAgo(new Date(message.createdAt));
+    const timeAgo = useTimeAgo(message.createdAt);
     const name = message.user.name;
     const app = useApp();
     const showUserName = app.user?.data?.userUuid !== message.user.uuid;
 
     return (
-        <Stack gap="sm" style={{ alignSelf: 'flex-end' }}>
+        <Stack gap="xs" style={{ alignSelf: 'flex-end' }}>
             <Stack gap={0} align="flex-end">
                 {showUserName ? (
                     <Text size="sm" c="gray.7" fw={600}>
                         {name}
                     </Text>
                 ) : null}
-                <Tooltip label={dayjs(message.createdAt).format()} withinPortal>
+                <Tooltip
+                    label={format(parseISO(message.createdAt), 'PPpp')}
+                    withinPortal
+                >
                     <Text size="xs" c="dimmed">
                         {timeAgo}
                     </Text>
                 </Tooltip>
             </Stack>
+
             <Card
                 pos="relative"
                 radius="md"
@@ -84,18 +92,52 @@ export const UserBubble: FC<{ message: AiAgentMessageUser<AiAgentUser> }> = ({
     );
 };
 
+const AssistantBubbleContent: FC<{ message: AiAgentMessageAssistant }> = ({
+    message,
+}) => {
+    const streamingState = useAiAgentThreadStreamQuery(message.threadUuid);
+    const isStubbed = isOptimisticMessageStub(message.message);
+    const isStreaming =
+        useAiAgentThreadStreaming(message.threadUuid) && isStubbed;
+    const messageContent =
+        isStreaming && streamingState
+            ? streamingState.content
+            : isStubbed // avoid brief flash of `THINKING_STUB`
+            ? ''
+            : message.message ?? 'No response...';
+
+    return (
+        <>
+            {isStreaming && <AgentToolCalls />}
+            <MDEditor.Markdown
+                source={messageContent}
+                style={{ backgroundColor: 'transparent' }}
+            />
+            {isStreaming ? <Loader type="dots" color="gray" /> : null}
+        </>
+    );
+};
+
 export const AssistantBubble: FC<{
     message: AiAgentMessageAssistant;
     isPreview?: boolean;
 }> = memo(({ message, isPreview = false }) => {
-    const { agentUuid } = useParams();
-    const { activeProjectUuid } = useActiveProjectUuid();
+    const { agentUuid, projectUuid } = useParams();
 
-    const vizQuery = useAiAgentThreadMessageViz({
+    const queryExecutionHandle = useAiAgentThreadMessageVizQuery({
         agentUuid: agentUuid!,
         message,
-        activeProjectUuid,
+        projectUuid,
     });
+
+    const queryResults = useInfiniteQueryResults(
+        projectUuid,
+        queryExecutionHandle?.data?.query.queryUuid,
+    );
+
+    const isQueryLoading =
+        queryExecutionHandle.isLoading || queryResults.isFetchingRows;
+    const isQueryError = queryExecutionHandle.isError || queryResults.error;
 
     const updateFeedbackMutation = useUpdatePromptFeedbackMutation(
         agentUuid,
@@ -114,35 +156,32 @@ export const AssistantBubble: FC<{
     );
 
     const handleUpvote = useCallback(() => {
-        if (!activeProjectUuid || message.humanScore !== null) return; // Prevent changes if already rated
+        if (!projectUuid || message.humanScore !== null) return; // Prevent changes if already rated
         updateFeedbackMutation.mutate({
             messageUuid: message.uuid,
             humanScore: 1,
         });
-    }, [
-        activeProjectUuid,
-        message.uuid,
-        message.humanScore,
-        updateFeedbackMutation,
-    ]);
+    }, [projectUuid, message.uuid, message.humanScore, updateFeedbackMutation]);
 
     const handleDownvote = useCallback(() => {
-        if (!activeProjectUuid || message.humanScore !== null) return; // Prevent changes if already rated
+        if (!projectUuid || message.humanScore !== null) return; // Prevent changes if already rated
         updateFeedbackMutation.mutate({
             messageUuid: message.uuid,
             humanScore: -1,
         });
-    }, [
-        activeProjectUuid,
-        message.uuid,
-        message.humanScore,
-        updateFeedbackMutation,
-    ]);
+    }, [projectUuid, message.uuid, message.humanScore, updateFeedbackMutation]);
 
-    // TODO: Do not use hardcoded string for loading state
-    const isLoading = message.message === 'Thinking...';
     const hasRating =
         message.humanScore !== undefined && message.humanScore !== null;
+
+    const isLoading =
+        useAiAgentThreadStreaming(message.threadUuid) &&
+        isOptimisticMessageStub(message.message);
+
+    const metricQuery = queryExecutionHandle.data?.query.metricQuery;
+    const vizConfig = message.vizConfigOutput;
+
+    if (!projectUuid) throw new Error(`Project Uuid not found`);
 
     return (
         <Stack
@@ -154,37 +193,27 @@ export const AssistantBubble: FC<{
                 borderStartStartRadius: '0px',
             }}
         >
-            {isLoading ? (
-                <Loader
-                    type="dots"
-                    color="gray"
-                    delayedMessage="Processing your request, this may take a moment"
-                />
-            ) : (
-                <MDEditor.Markdown
-                    source={message.message}
-                    style={{ backgroundColor: 'transparent' }}
-                />
-            )}
+            <AssistantBubbleContent message={message} />
 
-            {message.vizConfigOutput && message.metricQuery && (
+            {vizConfig && metricQuery && (
                 <Paper
                     withBorder
                     radius="md"
                     p="md"
                     shadow="none"
-                    {...((vizQuery.isError || vizQuery.isLoading) && {
+                    {...((queryExecutionHandle.isError ||
+                        queryExecutionHandle.isLoading) && {
                         bg: 'gray.0',
                         style: {
                             borderStyle: 'dashed',
                         },
                     })}
                 >
-                    {vizQuery.isLoading ? (
+                    {isQueryLoading ? (
                         <Center>
                             <Loader type="dots" color="gray" />
                         </Center>
-                    ) : vizQuery.isError ? (
+                    ) : isQueryError ? (
                         <Stack gap="xs" align="center">
                             <MantineIcon
                                 icon={IconExclamationCircle}
@@ -196,12 +225,17 @@ export const AssistantBubble: FC<{
                             </Text>
                         </Stack>
                     ) : (
-                        <AiChartVisualization vizData={vizQuery.data} />
+                        <AiChartVisualization
+                            results={queryResults}
+                            message={message}
+                            queryExecutionHandle={queryExecutionHandle}
+                            projectUuid={projectUuid}
+                        />
                     )}
                 </Paper>
             )}
             <Group gap={0} display={isPreview ? 'none' : 'flex'}>
-                <CopyButton value={message.message}>
+                <CopyButton value={message.message ?? ''}>
                     {({ copied, copy }) => (
                         <ActionIcon
                             variant="subtle"
@@ -252,23 +286,6 @@ export const AssistantBubble: FC<{
                             }
                         />
                     </ActionIcon>
-                )}
-                {!!vizQuery.data?.openInExploreUrl && (
-                    <Button
-                        variant="subtle"
-                        color="gray"
-                        size="xs"
-                        aria-label="open in explore"
-                        leftSection={<MantineIcon icon={IconExternalLink} />}
-                        component={Link}
-                        to={vizQuery.data.openInExploreUrl}
-                        target="_blank"
-                        style={{
-                            color: '#868e96',
-                        }}
-                    >
-                        Continue exploring
-                    </Button>
                 )}
             </Group>
         </Stack>

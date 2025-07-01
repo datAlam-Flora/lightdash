@@ -67,7 +67,17 @@ export type WarehouseExecuteAsyncQuery = {
     durationMs: number;
 };
 
-export interface WarehouseClient {
+export interface WarehouseSqlBuilder {
+    getStartOfWeek: () => WeekDay | null | undefined;
+    getAdapterType: () => SupportedDbtAdapter;
+    getStringQuoteChar: () => string;
+    getEscapeStringQuoteChar: () => string;
+    getFieldQuoteChar: () => string;
+    getMetricSql: (sql: string, metric: Metric) => string;
+    concatString: (...args: string[]) => string;
+}
+
+export interface WarehouseClient extends WarehouseSqlBuilder {
     credentials: CreateWarehouseCredentials;
     getCatalog: (
         config: {
@@ -111,18 +121,6 @@ export interface WarehouseClient {
     ): Promise<WarehouseResults>;
 
     test(): Promise<void>;
-
-    getStartOfWeek(): WeekDay | null | undefined;
-
-    getAdapterType(): SupportedDbtAdapter;
-
-    getStringQuoteChar(): string;
-
-    getEscapeStringQuoteChar(): string;
-
-    getMetricSql(sql: string, metric: Metric): string;
-
-    concatString(...args: string[]): string;
 
     getAllTables(
         schema?: string,

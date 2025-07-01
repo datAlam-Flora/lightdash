@@ -1,6 +1,5 @@
 import {
     ContentType,
-    DashboardTileTypes,
     type DashboardTab,
     type DashboardTile,
     type Dashboard as IDashboard,
@@ -47,9 +46,10 @@ const Dashboard: FC = () => {
         mode?: string;
         tabUuid?: string;
     }>();
-    const { data: spaces } = useSpaceSummaries(projectUuid);
+    const { data: spaces } = useSpaceSummaries(projectUuid, true);
 
-    const { clearIsEditingDashboardChart } = useDashboardStorage();
+    const { clearIsEditingDashboardChart, clearDashboardStorage } =
+        useDashboardStorage();
 
     const isDashboardLoading = useDashboardContext((c) => c.isDashboardLoading);
     const dashboard = useDashboardContext((c) => c.dashboard);
@@ -126,14 +126,6 @@ const Dashboard: FC = () => {
     const [isDuplicateModalOpen, duplicateModalHandlers] = useDisclosure();
     const [isExportDashboardModalOpen, exportDashboardModalHandlers] =
         useDisclosure();
-
-    const hasNewSemanticLayerChart = useMemo(() => {
-        if (!dashboardTiles) return false;
-
-        return dashboardTiles.some(
-            (tile) => tile.type === DashboardTileTypes.SEMANTIC_VIEWER_CHART,
-        );
-    }, [dashboardTiles]);
 
     // tabs state
     const [activeTab, setActiveTab] = useState<DashboardTab | undefined>();
@@ -565,6 +557,7 @@ const Dashboard: FC = () => {
                             <Button
                                 color="red"
                                 onClick={() => {
+                                    clearDashboardStorage();
                                     blocker.proceed();
                                 }}
                             >
@@ -597,7 +590,6 @@ const Dashboard: FC = () => {
                             haveTabsChanged ||
                             hasDateZoomDisabledChanged
                         }
-                        hasNewSemanticLayerChart={hasNewSemanticLayerChart}
                         onAddTiles={handleAddTiles}
                         onSaveDashboard={() => {
                             const dimensionFilters = [
@@ -668,7 +660,7 @@ const Dashboard: FC = () => {
                         )}
                     </Group>
                     {/* DateZoom section will adjust width dynamically */}
-                    {hasDashboardTiles && !hasNewSemanticLayerChart && (
+                    {hasDashboardTiles && (
                         <Box style={{ marginLeft: 'auto' }}>
                             <DateZoom isEditMode={isEditMode} />
                         </Box>

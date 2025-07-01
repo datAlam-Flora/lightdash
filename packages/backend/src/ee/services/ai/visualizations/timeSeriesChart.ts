@@ -1,10 +1,10 @@
 import {
     AiChartType,
     AiMetricQuery,
-    filterSchema,
-    FilterSchemaType,
+    filtersSchema,
+    filtersSchemaTransformed,
     MetricQuery,
-    SortFieldSchema,
+    timeSeriesMetricVizConfigSchema,
 } from '@lightdash/common';
 import { z } from 'zod';
 import { ProjectService } from '../../../../services/ProjectService/ProjectService';
@@ -15,45 +15,7 @@ import {
 } from '../utils/validators';
 import { getPivotedResults } from './getPivotedResults';
 
-export const timeSeriesMetricChartConfigSchema = z.object({
-    title: z
-        .string()
-        .describe(
-            'The title of the chart. If not provided the chart will have no title.',
-        )
-        .nullable(),
-    exploreName: z
-        .string()
-        .describe(
-            'The name of the explore containing the metrics and dimensions used for the chart.',
-        ),
-    xDimension: z
-        .string()
-        .describe(
-            'The field id of the time dimension to be displayed on the x-axis.',
-        ),
-    yMetrics: z
-        .array(z.string())
-        .min(1)
-        .describe(
-            'At least one metric is required. The field ids of the metrics to be displayed on the y-axis. If there are multiple metrics there will be one line per metric',
-        ),
-    sorts: z
-        .array(SortFieldSchema)
-        .describe(
-            'Sort configuration for the query, it can use a combination of metrics and dimensions.',
-        ),
-    breakdownByDimension: z
-        .string()
-        .nullable()
-        .describe(
-            'The field id of the dimension used to split the metrics into series for each dimension value. For example if you wanted to split a metric into multiple series based on City you would use the City dimension field id here. If this is not provided then the metric will be displayed as a single series.',
-        ),
-    lineType: z
-        .union([z.literal('line'), z.literal('area')])
-        .describe(
-            'default line. The type of line to display. If area then the area under the line will be filled in.',
-        ),
+const vizConfigSchema = timeSeriesMetricVizConfigSchema.extend({
     limit: z
         .number()
         .max(AI_DEFAULT_MAX_QUERY_LIMIT)
@@ -65,17 +27,15 @@ export const timeSeriesMetricChartConfigSchema = z.object({
 });
 
 export const generateTimeSeriesVizConfigToolSchema = z.object({
-    vizConfig: timeSeriesMetricChartConfigSchema,
-    filters: filterSchema
+    vizConfig: vizConfigSchema,
+    filters: filtersSchema
         .nullable()
         .describe(
             'Filters to apply to the query. Filtered fields must exist in the selected explore.',
         ),
 });
 
-export type TimeSeriesMetricChartConfig = z.infer<
-    typeof timeSeriesMetricChartConfigSchema
->;
+export type TimeSeriesMetricChartConfig = z.infer<typeof vizConfigSchema>;
 
 export const isTimeSeriesMetricChartConfig = (
     config: unknown,
@@ -84,7 +44,7 @@ export const isTimeSeriesMetricChartConfig = (
 
 export const metricQueryTimeSeriesChartMetric = (
     config: TimeSeriesMetricChartConfig,
-    filters: FilterSchemaType | null,
+    filters: z.infer<typeof filtersSchemaTransformed> = {},
 ): AiMetricQuery => {
     const metrics = config.yMetrics;
     const dimensions = [
@@ -99,11 +59,7 @@ export const metricQueryTimeSeriesChartMetric = (
         limit: getValidAiQueryLimit(limit),
         sorts,
         exploreName: config.exploreName,
-        // TODO: fix types
-        filters: {
-            metrics: filters?.metrics ?? undefined,
-            dimensions: filters?.dimensions ?? undefined,
-        },
+        filters,
     };
 };
 
@@ -175,13 +131,13 @@ type RenderTimeseriesChartArgs = {
         metricQuery: AiMetricQuery,
     ) => ReturnType<InstanceType<typeof ProjectService>['runMetricQuery']>;
     vizConfig: TimeSeriesMetricChartConfig;
-    filters: FilterSchemaType | null;
+    filters: z.infer<typeof filtersSchemaTransformed> | undefined;
 };
 
 export const renderTimeseriesChart = async ({
     runMetricQuery,
     vizConfig,
-    filters,
+    filters = {},
 }: RenderTimeseriesChartArgs): Promise<{
     type: AiChartType.TIME_SERIES_CHART;
     metricQuery: AiMetricQuery;

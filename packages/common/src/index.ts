@@ -33,7 +33,11 @@ import {
     type Metric,
     type TableCalculation,
 } from './types/field';
-import { type AdditionalMetric, type MetricQuery } from './types/metricQuery';
+import {
+    type AdditionalMetric,
+    type MetricQuery,
+    type QueryWarning,
+} from './types/metricQuery';
 import {
     OrganizationMemberRole,
     type ApiOrganizationMemberProfiles,
@@ -116,11 +120,16 @@ import { type UserWarehouseCredentials } from './types/userWarehouseCredentials'
 import { type ValidationResponse } from './types/validation';
 
 import type {
+    ApiAiAgentThreadCreateResponse,
+    ApiAiAgentThreadMessageCreateResponse,
+    ApiAiAgentThreadMessageVizQueryResponse,
     ApiAiAgentThreadMessageVizResponse,
     ApiAiAgentThreadResponse,
     ApiAiConversationMessages,
     ApiAiConversationResponse,
     ApiAiConversations,
+    ApiGetUserAgentPreferencesResponse,
+    ApiUpdateUserAgentPreferencesResponse,
     DecodedEmbed,
     EmbedUrl,
 } from './ee';
@@ -151,12 +160,6 @@ import { type ApiPromotionChangesResponse } from './types/promotion';
 import type { QueryHistoryStatus } from './types/queryHistory';
 import { type ApiRenameFieldsResponse } from './types/rename';
 import { type SchedulerWithLogs } from './types/schedulerLog';
-import {
-    type ApiSemanticLayerClientInfo,
-    type ApiSemanticViewerChartCreate,
-    type ApiSemanticViewerChartGet,
-    type ApiSemanticViewerChartUpdate,
-} from './types/semanticLayer';
 import {
     type ApiCreateSqlChart,
     type ApiCreateVirtualView,
@@ -205,17 +208,16 @@ export * from './types/api/sort';
 export * from './types/api/spotlight';
 export * from './types/api/success';
 export * from './types/api/uuid';
+export * from './types/auth';
 export * from './types/bigQuerySSO';
 export * from './types/catalog';
 export * from './types/coder';
 export * from './types/comments';
 export * from './types/conditionalFormatting';
-export * from './types/conditionalRule';
 export * from './types/content';
 export * from './types/csv';
 export * from './types/dashboard';
 export * from './types/dbt';
-export * from './types/dbtSemanticLayer';
 export * from './types/downloadFile';
 export * from './types/email';
 export * from './types/errors';
@@ -254,7 +256,6 @@ export * from './types/scheduler';
 export * from './types/schedulerLog';
 export * from './types/schedulerTaskList';
 export * from './types/search';
-export * from './types/semanticLayer';
 export * from './types/share';
 export * from './types/slack';
 export * from './types/slackSettings';
@@ -300,7 +301,6 @@ export * from './utils/promises';
 export * from './utils/sanitizeHtml';
 export * from './utils/scheduler';
 export * from './utils/searchParams';
-export * from './utils/semanticLayer';
 export * from './utils/sleep';
 export * from './utils/slugs';
 export * from './utils/subtotals';
@@ -542,6 +542,7 @@ export type ApiExecuteAsyncMetricQueryResults =
     ApiExecuteAsyncQueryResultsCommon & {
         metricQuery: MetricQuery;
         fields: ItemsMap;
+        warnings: QueryWarning[];
     };
 
 export type ApiExecuteAsyncDashboardChartQueryResults =
@@ -885,10 +886,6 @@ type ApiResults =
     | ApiContentResponse['results']
     | ApiChartContentResponse['results']
     | ApiSqlRunnerJobStatusResponse['results']
-    | ApiSemanticLayerClientInfo['results']
-    | ApiSemanticViewerChartCreate['results']
-    | ApiSemanticViewerChartGet['results']
-    | ApiSemanticViewerChartUpdate['results']
     | ApiCreateVirtualView['results']
     | ApiGithubDbtWritePreview['results']
     | ApiMetricsCatalog['results']
@@ -912,7 +909,12 @@ type ApiResults =
     | ApiDownloadAsyncQueryResults
     | ApiDownloadAsyncQueryResultsAsXlsx
     | ApiAiAgentThreadResponse['results']
-    | ApiAiAgentThreadMessageVizResponse['results'];
+    | ApiAiAgentThreadMessageVizResponse['results']
+    | ApiAiAgentThreadMessageVizQueryResponse['results']
+    | ApiUpdateUserAgentPreferencesResponse['results']
+    | ApiGetUserAgentPreferencesResponse[`results`]
+    | ApiAiAgentThreadCreateResponse['results']
+    | ApiAiAgentThreadMessageCreateResponse['results'];
 
 export type ApiResponse<T extends ApiResults = ApiResults> = {
     status: 'ok';
@@ -985,6 +987,7 @@ export type HealthState = {
     requiresOrgRegistration: boolean;
     hasEmailClient: boolean;
     hasMicrosoftTeams: boolean;
+    isServiceAccountEnabled: boolean;
     latest: {
         version?: string;
     };
@@ -1007,6 +1010,7 @@ export type HealthState = {
             loginPath: string;
             googleDriveApiKey: string | undefined;
             enabled: boolean;
+            enableGCloudADC: boolean;
         };
         okta: {
             enabled: boolean;
@@ -1103,7 +1107,23 @@ export type CreateProject = Omit<
     warehouseConnection: CreateWarehouseCredentials;
     copyWarehouseConnectionFromUpstreamProject?: boolean;
     tableConfiguration?: CreateProjectTableConfiguration;
+    copyContent?: boolean;
 };
+
+export type CreateProjectOptionalCredentials = Omit<
+    CreateProject,
+    'warehouseConnection'
+> & {
+    warehouseConnection?: CreateWarehouseCredentials;
+};
+
+export const hasWarehouseCredentials = (
+    createProject: CreateProjectOptionalCredentials,
+): createProject is CreateProjectOptionalCredentials & {
+    warehouseConnection: CreateWarehouseCredentials;
+} =>
+    !!createProject.warehouseConnection &&
+    Object.keys(createProject.warehouseConnection).length > 0;
 
 export type UpdateProject = Omit<
     Project,

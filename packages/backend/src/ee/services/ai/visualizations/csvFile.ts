@@ -1,9 +1,9 @@
 import {
     AiChartType,
     AiMetricQuery,
-    filterSchema,
-    FilterSchemaType,
-    SortFieldSchema,
+    csvFileVizConfigSchema,
+    filtersSchema,
+    filtersSchemaTransformed,
 } from '@lightdash/common';
 import { stringify } from 'csv-stringify/sync';
 import { z } from 'zod';
@@ -12,30 +12,8 @@ import { ProjectService } from '../../../../services/ProjectService/ProjectServi
 import { FollowUpTools, followUpToolsSchema } from '../types/followUpTools';
 import { getValidAiQueryLimit } from '../utils/validators';
 
-export const csvFileConfigSchema = z
-    .object({
-        exploreName: z
-            .string()
-            .describe(
-                'The name of the explore containing the metrics and dimensions used for csv query',
-            ),
-        metrics: z
-            .array(z.string())
-            .min(1)
-            .describe(
-                'At least one metric is required. The field ids of the metrics to be calculated for the CSV. They will be grouped by the dimensions.',
-            ),
-        dimensions: z
-            .array(z.string())
-            .nullable()
-            .describe(
-                'The field id for the dimensions to group the metrics by',
-            ),
-        sorts: z
-            .array(SortFieldSchema)
-            .describe(
-                'Sort configuration for the query, it can use a combination of metrics and dimensions.',
-            ),
+const vizConfigSchema = csvFileVizConfigSchema
+    .extend({
         limit: z
             .number()
             .nullable()
@@ -49,15 +27,15 @@ export const csvFileConfigSchema = z
     );
 
 export const generateCsvToolSchema = z.object({
-    vizConfig: csvFileConfigSchema,
-    filters: filterSchema
+    vizConfig: vizConfigSchema,
+    filters: filtersSchema
         .nullable()
         .describe(
             'Filters to apply to the query. Filtered fields must exist in the selected explore.',
         ),
 });
 
-export type CsvFileConfig = z.infer<typeof csvFileConfigSchema>;
+export type CsvFileConfig = z.infer<typeof vizConfigSchema>;
 
 export const isCsvFileConfig = (config: unknown): config is CsvFileConfig =>
     typeof config === 'object' &&
@@ -68,18 +46,14 @@ export const isCsvFileConfig = (config: unknown): config is CsvFileConfig =>
 export const metricQueryCsv = async (
     config: CsvFileConfig,
     maxLimit: number,
-    filters: FilterSchemaType | null,
+    filters: z.infer<typeof filtersSchemaTransformed> = {},
 ): Promise<AiMetricQuery> => ({
     exploreName: config.exploreName,
     metrics: config.metrics,
     dimensions: config.dimensions || [],
     sorts: config.sorts,
     limit: getValidAiQueryLimit(config.limit, maxLimit),
-    // TODO: fix types
-    filters: {
-        metrics: filters?.metrics ?? undefined,
-        dimensions: filters?.dimensions ?? undefined,
-    },
+    filters,
 });
 
 type RenderCsvFileArgs = {
@@ -87,7 +61,7 @@ type RenderCsvFileArgs = {
         metricQuery: AiMetricQuery,
     ) => ReturnType<InstanceType<typeof ProjectService>['runMetricQuery']>;
     config: CsvFileConfig;
-    filters: FilterSchemaType | null;
+    filters: z.infer<typeof filtersSchemaTransformed> | undefined;
     maxLimit: number;
 };
 

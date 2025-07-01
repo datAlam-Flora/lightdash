@@ -12,6 +12,7 @@ services:
             - MINIO_ROOT_USER=${MINIO_ROOT_USER}
             - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
             - MINIO_DEFAULT_BUCKETS=${MINIO_DEFAULT_BUCKETS}
+            - MINIO_BROWSER=${MINIO_BROWSER:-off}
 
     lightdash-dev:
         build:
@@ -49,8 +50,7 @@ services:
             - GROUPS_ENABLED=${GROUPS_ENABLED}
             - POSTHOG_PROJECT_API_KEY=${POSTHOG_PROJECT_API_KEY}
             - OPENAI_API_KEY=${OPENAI_API_KEY}
-            - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME}
-            - OPENAI_EMBEDDING_MODEL_NAME=${OPENAI_EMBEDDING_MODEL_NAME}
+            - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
             - AI_COPILOT_ENABLED=${AI_COPILOT_ENABLED}
             - AI_COPILOT_EMBEDDING_SEARCH_ENABLED=${AI_COPILOT_EMBEDDING_SEARCH_ENABLED}
             - POSTHOG_FE_API_HOST=${POSTHOG_FE_API_HOST}
@@ -66,6 +66,7 @@ services:
             - GITHUB_APP_NAME=${GITHUB_APP_NAME}
             - GITHUB_REDIRECT_DOMAIN=${GITHUB_REDIRECT_DOMAIN}
             - GOOGLE_DRIVE_API_KEY=${GOOGLE_DRIVE_API_KEY}
+            - AUTH_ENABLE_GCLOUD_ADC=${AUTH_ENABLE_GCLOUD_ADC}
             - AUTH_GOOGLE_OAUTH2_CLIENT_ID=${AUTH_GOOGLE_OAUTH2_CLIENT_ID}
             - AUTH_GOOGLE_OAUTH2_CLIENT_SECRET=${AUTH_GOOGLE_OAUTH2_CLIENT_SECRET}
             - S3_ENDPOINT=${S3_ENDPOINT}
@@ -83,6 +84,7 @@ services:
             - '../:/usr/app'
             - '../examples/full-jaffle-shop-demo/dbt:/usr/app/dbt'
             - 'node_modules:/usr/app/node_modules/' # clears the node_modules directory so it doesn't sync (v.slow on MacOS)
+            # - ${HOME}/.config/gcloud:/root/.config/gcloud # Uncomment this line if you want to use your credential as gcloud ADC in dev container
         ports:
             - '8080:8080'
             - '9090:9090'

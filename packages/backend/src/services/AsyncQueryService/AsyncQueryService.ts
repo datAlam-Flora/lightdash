@@ -16,6 +16,7 @@ import {
     createVirtualView as createVirtualViewObject,
     CreateWarehouseCredentials,
     type CustomDimension,
+    CustomSqlQueryForbiddenError,
     DashboardFilters,
     DEFAULT_RESULTS_PAGE_SIZE,
     Dimension,
@@ -65,6 +66,7 @@ import {
     type ResultColumns,
     ResultRow,
     type RunQueryTags,
+    SchedulerFormat,
     SessionUser,
     sleep,
     SortBy,
@@ -81,20 +83,21 @@ import { SshTunnel } from '@lightdash/warehouses';
 import { createInterface } from 'readline';
 import { Readable, Writable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
+import { DownloadCsv } from '../../analytics/LightdashAnalytics';
 import { S3ResultsFileStorageClient } from '../../clients/ResultsFileStorageClients/S3ResultsFileStorageClient';
-import Logger from '../../logging/logger';
 import { measureTime } from '../../logging/measureTime';
 import { QueryHistoryModel } from '../../models/QueryHistoryModel/QueryHistoryModel';
 import type { SavedSqlModel } from '../../models/SavedSqlModel';
+import { wrapSentryTransaction } from '../../utils';
+import { processFieldsForExport } from '../../utils/FileDownloadUtils/FileDownloadUtils';
 import {
-    applyLimitToSqlQuery,
     QueryBuilder,
     ReferenceMap,
-} from '../../queryBuilder';
-import { wrapSentryTransaction } from '../../utils';
+} from '../../utils/QueryBuilder/queryBuilder';
+import { applyLimitToSqlQuery } from '../../utils/QueryBuilder/utils';
 import type { ICacheService } from '../CacheService/ICacheService';
 import { CreateCacheResult } from '../CacheService/types';
-import { CsvService, getSchedulerCsvLimit } from '../CsvService/CsvService';
+import { CsvService } from '../CsvService/CsvService';
 import { ExcelService } from '../ExcelService/ExcelService';
 import {
     ProjectService,
@@ -637,7 +640,45 @@ export class AsyncQueryService extends ProjectService {
         return this.downloadAsyncQueryResults(args);
     }
 
-    async downloadAsyncQueryResults({
+    async download(args: DownloadAsyncQueryResultsArgs) {
+        const { user, projectUuid, onlyRaw, type } = args;
+        const baseAnalyticsProperties: DownloadCsv['properties'] = {
+            organizationId: user.organizationUuid,
+            projectId: projectUuid,
+            fileType:
+                type === DownloadFileType.XLSX
+                    ? SchedulerFormat.XLSX
+                    : SchedulerFormat.CSV,
+            values: onlyRaw ? 'raw' : 'formatted',
+            storage: this.s3Client.isEnabled() ? 's3' : 'local',
+        };
+        this.analytics.track({
+            event: 'download_results.started',
+            userId: user.userUuid,
+            properties: baseAnalyticsProperties,
+        });
+        try {
+            const downloadResult = await this.downloadAsyncQueryResults(args);
+            this.analytics.track({
+                event: 'download_results.completed',
+                userId: user.userUuid,
+                properties: baseAnalyticsProperties,
+            });
+            return downloadResult;
+        } catch (error) {
+            this.analytics.track({
+                event: 'download_results.error',
+                userId: user.userUuid,
+                properties: {
+                    ...baseAnalyticsProperties,
+                    error: getErrorMessage(error),
+                },
+            });
+            throw error;
+        }
+    }
+
+    private async downloadAsyncQueryResults({
         user,
         projectUuid,
         queryUuid,
@@ -790,23 +831,19 @@ export class AsyncQueryService extends ProjectService {
                         },
                     });
                 }
-                return this.downloadAsyncQueryResultsAsFormattedFile(
+                // Use direct Excel export to bypass PassThrough + Upload hanging issues
+                return ExcelService.downloadAsyncExcelDirectly(
                     resultsFileName,
                     resultFields,
-                    {
-                        generateFileId: ExcelService.generateFileId,
-                        streamJsonlRowsToFile:
-                            ExcelService.streamJsonlRowsToFile,
-                    },
+                    this.storageClient,
                     {
                         onlyRaw,
                         showTableNames,
                         customLabels,
                         columnOrder,
                         hiddenFields,
-                        pivotConfig,
+                        attachmentDownloadName,
                     },
-                    attachmentDownloadName,
                 );
             case undefined:
             case DownloadFileType.JSONL:
@@ -860,33 +897,12 @@ export class AsyncQueryService extends ProjectService {
             hiddenFields = [],
         } = options || {};
 
-        // Filter out hidden fields and apply column ordering
-        const availableFieldIds = Object.keys(fields).filter(
-            (id) => !hiddenFields.includes(id),
-        );
-        const sortedFieldIds =
-            columnOrder.length > 0
-                ? [
-                      ...columnOrder.filter((id) =>
-                          availableFieldIds.includes(id),
-                      ),
-                      ...availableFieldIds.filter(
-                          (id) => !columnOrder.includes(id),
-                      ),
-                  ]
-                : availableFieldIds;
-
-        const headers = sortedFieldIds.map((fieldId) => {
-            if (customLabels[fieldId]) {
-                return customLabels[fieldId];
-            }
-            const item = fields[fieldId];
-            if (!item) {
-                return fieldId;
-            }
-            return showTableNames
-                ? getItemLabel(item)
-                : getItemLabelWithoutTableName(item);
+        // Process fields and generate headers using shared utility
+        const { sortedFieldIds, headers } = processFieldsForExport(fields, {
+            showTableNames,
+            customLabels,
+            columnOrder,
+            hiddenFields,
         });
 
         // Transform and upload the results
@@ -1302,6 +1318,7 @@ export class AsyncQueryService extends ProjectService {
         return {
             sql: fullQuery.query,
             fields: fieldsWithOverrides,
+            warnings: fullQuery.warnings,
         };
     }
 
@@ -1562,9 +1579,7 @@ export class AsyncQueryService extends ProjectService {
                 subject('CustomSql', { organizationUuid, projectUuid }),
             )
         ) {
-            throw new ForbiddenError(
-                'User cannot run queries with custom SQL dimensions',
-            );
+            throw new CustomSqlQueryForbiddenError();
         }
 
         const requestParameters: ExecuteAsyncMetricQueryRequestParams = {
@@ -1596,13 +1611,14 @@ export class AsyncQueryService extends ProjectService {
             },
         );
 
-        const { sql, fields } = await this.prepareMetricQueryAsyncQueryArgs({
-            user,
-            metricQuery,
-            dateZoom,
-            explore,
-            warehouseClient: warehouseConnection.warehouseClient,
-        });
+        const { sql, fields, warnings } =
+            await this.prepareMetricQueryAsyncQueryArgs({
+                user,
+                metricQuery,
+                dateZoom,
+                explore,
+                warehouseClient: warehouseConnection.warehouseClient,
+            });
 
         const { queryUuid, cacheMetadata } = await this.executeAsyncQuery(
             {
@@ -1627,6 +1643,7 @@ export class AsyncQueryService extends ProjectService {
             cacheMetadata,
             metricQuery,
             fields,
+            warnings,
         };
     }
 
@@ -1735,12 +1752,13 @@ export class AsyncQueryService extends ProjectService {
             },
         );
 
-        const { sql, fields } = await this.prepareMetricQueryAsyncQueryArgs({
-            user,
-            metricQuery: metricQueryWithLimit,
-            explore,
-            warehouseClient: warehouseConnection.warehouseClient,
-        });
+        const { sql, fields, warnings } =
+            await this.prepareMetricQueryAsyncQueryArgs({
+                user,
+                metricQuery: metricQueryWithLimit,
+                explore,
+                warehouseClient: warehouseConnection.warehouseClient,
+            });
 
         const { queryUuid, cacheMetadata } = await this.executeAsyncQuery(
             {
@@ -1764,6 +1782,7 @@ export class AsyncQueryService extends ProjectService {
             cacheMetadata,
             metricQuery: metricQueryWithLimit,
             fields,
+            warnings,
         };
     }
 
@@ -1777,6 +1796,7 @@ export class AsyncQueryService extends ProjectService {
         dateZoom,
         context,
         invalidateCache,
+        limit,
     }: ExecuteAsyncDashboardChartQueryArgs): Promise<ApiExecuteAsyncDashboardChartQueryResults> {
         if (!isUserWithOrg(user)) {
             throw new ForbiddenError('User is not part of an organization');
@@ -1859,11 +1879,21 @@ export class AsyncQueryService extends ProjectService {
                     : savedChart.metricQuery.sorts,
         };
 
+        // Apply limit override if provided in the request
+        // For unlimited results (null), use Number.MAX_SAFE_INTEGER
+        const metricQueryWithLimit =
+            limit !== undefined
+                ? {
+                      ...metricQueryWithDashboardOverrides,
+                      limit: limit ?? MAX_SAFE_INTEGER,
+                  }
+                : metricQueryWithDashboardOverrides;
+
         const exploreDimensions = getDimensions(explore);
 
         const metricQueryDimensions = [
-            ...metricQueryWithDashboardOverrides.dimensions,
-            ...(metricQueryWithDashboardOverrides.customDimensions ?? []),
+            ...metricQueryWithLimit.dimensions,
+            ...(metricQueryWithLimit.customDimensions ?? []),
         ];
 
         const xAxisField = isCartesianChartConfig(savedChart.chartConfig.config)
@@ -1881,7 +1911,7 @@ export class AsyncQueryService extends ProjectService {
               );
 
         if (hasADateDimension) {
-            metricQueryWithDashboardOverrides.metadata = {
+            metricQueryWithLimit.metadata = {
                 hasADateDimension: {
                     name: hasADateDimension.name,
                     label: hasADateDimension.label,
@@ -1897,6 +1927,7 @@ export class AsyncQueryService extends ProjectService {
             dashboardFilters,
             dashboardSorts,
             dateZoom,
+            limit,
         };
 
         const queryTags: RunQueryTags = {
@@ -1920,7 +1951,7 @@ export class AsyncQueryService extends ProjectService {
 
         const { sql, fields } = await this.prepareMetricQueryAsyncQueryArgs({
             user,
-            metricQuery: metricQueryWithDashboardOverrides,
+            metricQuery: metricQueryWithLimit,
             explore,
             dateZoom,
             warehouseClient: warehouseConnection.warehouseClient,
@@ -1931,7 +1962,7 @@ export class AsyncQueryService extends ProjectService {
                 user,
                 projectUuid,
                 explore,
-                metricQuery: metricQueryWithDashboardOverrides,
+                metricQuery: metricQueryWithLimit,
                 context,
                 queryTags,
                 invalidateCache,
@@ -1948,7 +1979,7 @@ export class AsyncQueryService extends ProjectService {
             queryUuid,
             cacheMetadata,
             appliedDashboardFilters,
-            metricQuery: metricQueryWithDashboardOverrides,
+            metricQuery: metricQueryWithLimit,
             fields,
         };
     }
@@ -2086,13 +2117,14 @@ export class AsyncQueryService extends ProjectService {
             },
         );
 
-        const { sql, fields } = await this.prepareMetricQueryAsyncQueryArgs({
-            user,
-            metricQuery: underlyingDataMetricQuery,
-            explore,
-            dateZoom,
-            warehouseClient: warehouseConnection.warehouseClient,
-        });
+        const { sql, fields, warnings } =
+            await this.prepareMetricQueryAsyncQueryArgs({
+                user,
+                metricQuery: underlyingDataMetricQuery,
+                explore,
+                dateZoom,
+                warehouseClient: warehouseConnection.warehouseClient,
+            });
 
         const { queryUuid: underlyingDataQueryUuid, cacheMetadata } =
             await this.executeAsyncQuery(
@@ -2118,6 +2150,7 @@ export class AsyncQueryService extends ProjectService {
             cacheMetadata,
             metricQuery: underlyingDataMetricQuery,
             fields,
+            warnings,
         };
     }
 
@@ -2506,7 +2539,7 @@ export class AsyncQueryService extends ProjectService {
             tileUuid,
             dashboardFilters,
             dashboardSorts,
-            limit,
+            limit: limit ?? savedChart.limit,
         });
 
         const { queryUuid, cacheMetadata } = await this.executeAsyncQuery(

@@ -154,6 +154,7 @@ const VisualizationCard: FC<{
                     unsavedChartVersion.pivotConfig?.columns
                 }
                 resultsData={resultsData}
+                apiErrorDetail={query.error?.error}
                 isLoading={isLoadingQueryResults}
                 columnOrder={unsavedChartVersion.tableConfig.columnOrder}
                 onSeriesContextMenu={onSeriesContextMenu}
@@ -207,6 +208,7 @@ const VisualizationCard: FC<{
                         echartSeriesClickEvent={echartsClickEvent?.event}
                         dimensions={echartsClickEvent?.dimensions}
                         series={echartsClickEvent?.series}
+                        explore={explore}
                     />
                 </CollapsableCard>
             </VisualizationProvider>
